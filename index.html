@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <base href="/cie_def/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <meta name="description" content="Rinnova la tua Carta d'Identità Elettronica (CIE) in pochi passi.">
+  <meta name="theme-color" content="#0066CC">
+
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Rinnovo CIE">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Rinnovo CIE</title>
+  <link rel="manifest" href="manifest.json">
+</head>
+
+<body>
+  <!-- Cargar Tesseract ANTES de Flutter -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  
+  <script>
+  console.log('🔧 Iniciando carga de scanMRZ...');
+  
+  // Esperar a que Tesseract se cargue
+  (function waitForTesseract() {
+    if (typeof Tesseract !== 'undefined') {
+      console.log('✅ Tesseract cargado');
+      initScanMRZ();
+    } else {
+      console.log('⏳ Esperando Tesseract...');
+      setTimeout(waitForTesseract, 100);
+    }
+  })();
+  
+  function initScanMRZ() {
+    window.scanMRZ = async function(base64Image) {
+      console.log('🔍 Iniciando escaneo MRZ...');
+      
+      try {
+        const img = await base64ToImage(base64Image);
+        console.log(`📐 Imagen cargada: ${img.width}x${img.height}`);
+        
+        const processedImage = preprocessForMRZ(img);
+        
+        console.log('🤖 Ejecutando Tesseract OCR...');
+        const { data: { text } } = await Tesseract.recognize(
+          processedImage,
+          'eng',
+          {
+            logger: m => console.log('📊 OCR:', m.status, m.progress),
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+          }
+        );
+        
+        console.log('📝 Texto detectado:', text);
+        
+        const mrzLines = extractMRZLines(text);
+        
+        if (mrzLines.length >= 3) {
+          const mrzText = mrzLines.join('\n');
+          console.log('✅ MRZ encontrado:', mrzText);
+          return mrzText;
+        } else {
+          console.warn('⚠️ No se encontraron 3 líneas MRZ válidas');
+          return null;
+        }
+        
+      } catch (error) {
+        console.error('❌ Error en scanMRZ:', error);
+        return null;
+      }
+    };
+
+    function preprocessForMRZ(img) {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      // RECORTAR: Usar el 35% inferior de la imagen (zona MRZ + margen)
+      const cropStartY = Math.floor(img.height * 0.65);  // Comenzar en el 65% (antes era 70%)
+      const cropHeight = img.height - cropStartY;         // Hasta el final
+      
+      // Escalar para mejor OCR (mínimo 300 DPI equivalente)
+      const targetWidth = Math.max(img.width, 2000);
+      const scale = targetWidth / img.width;
+      
+      canvas.width = img.width * scale;
+      canvas.height = cropHeight * scale;
+      
+      // Dibujar SOLO la zona inferior recortada
+      ctx.drawImage(
+        img,
+        0, cropStartY,                    // Source: inicio X, inicio Y
+        img.width, cropHeight,            // Source: ancho, alto
+        0, 0,                             // Dest: inicio X, inicio Y
+        canvas.width, canvas.height       // Dest: ancho, alto
+      );
+      
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      
+      // Convertir a escala de grises con MUCHO contraste
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        
+        // Aumentar contraste agresivamente
+        const contrast = 2.0;  // Factor de contraste muy alto
+        const adjusted = ((gray - 128) * contrast) + 128;
+        
+        // Threshold más agresivo
+        const threshold = adjusted > 150 ? 255 : 0;
+        
+        data[i] = threshold;
+        data[i + 1] = threshold;
+        data[i + 2] = threshold;
+      }
+      
+      ctx.putImageData(imageData, 0, 0);
+      
+      console.log('🖼️ Imagen preprocesada (recortada):', canvas.width, 'x', canvas.height);
+      console.log('📐 Recorte: desde Y=' + cropStartY + ' (70% de ' + img.height + ')');
+      return canvas;
+    }
+
+    function extractMRZLines(text) {
+      console.log('🔍 Texto raw recibido:', text);
+      
+      const lines = text
+        .split('\n')
+        .map(line => line.trim().toUpperCase())
+        .filter(line => line.length > 0);
+      
+      console.log('📋 Líneas encontradas:', lines.length);
+      
+      // SIMPLE: Tomar las 3 ÚLTIMAS líneas
+      const mrzLines = [];
+      
+      if (lines.length >= 3) {
+        // Tomar las últimas 3 líneas
+        const lastThree = lines.slice(-3);
+        
+        for (let i = 0; i < lastThree.length; i++) {
+          const line = lastThree[i];
+          
+          // Limpiar caracteres - SOLO quitar inválidos, NO convertir letras a números todavía
+          let cleaned = line.replace(/[^A-Z0-9<]/g, '');  // Solo alfanuméricos y <
+          
+          console.log(`  Línea ${i+1}: "${cleaned}" (${cleaned.length} chars)`);
+          
+          // NO normalizar, dejar el largo que venga del OCR
+          mrzLines.push(cleaned);
+        }
+      }
+      
+      // POST-PROCESAMIENTO: Corregir errores comunes de OCR
+      if (mrzLines.length === 3) {
+        console.log('🔧 Antes de correcciones:');
+        console.log('  L1:', mrzLines[0]);
+        console.log('  L2:', mrzLines[1]);
+        console.log('  L3:', mrzLines[2]);
+        
+        mrzLines[0] = fixMRZLine1(mrzLines[0]);
+        mrzLines[1] = fixMRZLine2(mrzLines[1]);
+        mrzLines[2] = fixMRZLine3(mrzLines[2]);
+        
+        console.log('🔧 Después de correcciones:');
+        console.log('  L1:', mrzLines[0]);
+        console.log('  L2:', mrzLines[1]);
+        console.log('  L3:', mrzLines[2]);
+      }
+      
+      console.log(`📊 Total líneas MRZ encontradas: ${mrzLines.length}`);
+      return mrzLines;
+    }
+    
+    // Corrección Línea 1: IDITA<<<<<<<<<<<<<<<<<<<<<<<<<<
+    function fixMRZLine1(line) {
+      let fixed = line;
+      
+      // K y L son casi siempre < en MRZ
+      fixed = fixed.replace(/K/g, '<');
+      fixed = fixed.replace(/L/g, '<');
+      
+      // Corregir inicio común: debe empezar con IDITA
+      // Patrones comunes: 1D1TA, ID1TA, 1DITA
+      if (fixed.startsWith('1D1TA')) {
+        fixed = 'IDITA' + fixed.substring(5);
+      } else if (fixed.startsWith('ID1TA')) {
+        fixed = 'IDITA' + fixed.substring(5);
+      } else if (fixed.startsWith('1DITA')) {
+        fixed = 'IDITA' + fixed.substring(5);
+      }
+      
+      return fixed;
+    }
+    
+    // Corrección Línea 2: 6412308F2212304ITA<<<<<<<<<0
+    function fixMRZLine2(line) {
+      let fixed = line;
+      
+      // SOLO K y L son <, NO tocar números
+      fixed = fixed.replace(/K/g, '<');
+      fixed = fixed.replace(/L/g, '<');
+      
+      // NO hacer más correcciones aquí, los números deben quedarse como están
+      
+      return fixed;
+    }
+    
+    // Corrección Línea 3: ROSSI<<MARIO<<<<<<<<<<<<<<<<
+    function fixMRZLine3(line) {
+      let fixed = line;
+      
+      // K y L son <
+      fixed = fixed.replace(/K/g, '<');
+      fixed = fixed.replace(/L/g, '<');
+      
+      // En nombres italianos, corregir números comunes:
+      // 0 -> O, 5 -> S, 1 -> I en contexto de letras
+      // Solo en los primeros 20 caracteres (zona de nombre/apellido)
+      const namePart = fixed.substring(0, 20);
+      const restPart = fixed.substring(20);
+      
+      let correctedName = namePart
+        .replace(/0/g, 'O')  // 0 -> O en nombres
+        .replace(/5/g, 'S')  // 5 -> S en nombres
+        .replace(/1/g, 'I'); // 1 -> I en nombres
+      
+      fixed = correctedName + restPart;
+      
+      return fixed;
+    }
+
+    function base64ToImage(base64) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = 'data:image/jpeg;base64,' + base64;
+      });
+    }
+    
+    console.log('✅ scanMRZ definido correctamente');
+  }
+  </script>
+
+  <script>
+    window.addEventListener('load', function () {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          for (let reg of registrations) { reg.unregister(); }
+        });
+      }
+    });
+  </script>
+  
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
